@@ -140,7 +140,7 @@ def process_hunks(hunks, boxes):
     offsets = [0, 0]
     changes = []
     for op, oplen in hunks:
-        if op == '=':
+        if op == 0:
             # This hunk represents a region in the two text documents that are
             # in common. So nothing to process but advance the counters.
             offsets[0] += oplen
@@ -151,11 +151,11 @@ def process_hunks(hunks, boxes):
             if len(changes) > 0 and changes[-1] != '*':
                 changes.append('*')
 
-        elif op in ('-', '+'):
+        elif op in (-1, 1):
             # This hunk represents a region of text only in the left
             # (op == "-") or right (op == "+") document.
             # The change is oplen chars long.
-            idx = 0 if (op == '-') else 1
+            idx = 0 if (op == 0) else 1
 
             mark_difference(oplen, offsets[idx], boxes[idx], changes)
 
