@@ -139,23 +139,32 @@ def process_hunks(hunks, boxes):
     # text boxes in the original PDFs.
     offsets = [0, 0]
     changes = []
-    for op, oplen in hunks:
+    for op, text in hunks:
+        oplen = len(text)
         if op == 0:
+
             # This hunk represents a region in the two text documents that are
             # in common. So nothing to process but advance the counters.
+
+            # Adding this to identify common text area
+            idx = '*'
+            mark_difference(oplen, offsets[0], boxes[0], changes, both=True)
+            mark_difference(oplen, offsets[1], boxes[1], changes, both=True)
+
             offsets[0] += oplen
             offsets[1] += oplen
 
             # Put a marker in the changes so we can line up equivalent parts
             # later.
-            if len(changes) > 0 and changes[-1] != '*':
-                changes.append('*')
+
+            # if len(changes) > 0 and changes[-1] != '*':
+            #    changes.append('*')
 
         elif op in (-1, 1):
             # This hunk represents a region of text only in the left
-            # (op == "-") or right (op == "+") document.
+            # (op == -1) or right (op == 1) document.
             # The change is oplen chars long.
-            idx = 0 if (op == 0) else 1
+            idx = 0 if (op == -1) else 1
 
             mark_difference(oplen, offsets[idx], boxes[idx], changes)
 
@@ -164,9 +173,10 @@ def process_hunks(hunks, boxes):
             # Although the text doesn't exist in the other document, we want to
             # mark the position where that text may have been to indicate an
             # insertion.
-            idx2 = 1 - idx
-            mark_difference(1, offsets[idx2] - 1, boxes[idx2], changes)
-            mark_difference(0, offsets[idx2] + 0, boxes[idx2], changes)
+            # idx2 = 1 - idx
+            # Testing removal of below line
+            # mark_difference(1, offsets[idx2], boxes[idx2], changes)
+            # mark_difference(0, offsets[idx2] - 1, boxes[idx2], changes)
 
         else:
             raise ValueError(op)
@@ -178,7 +188,7 @@ def process_hunks(hunks, boxes):
     return changes
 
 
-def mark_difference(hunk_length, offset, boxes, changes):
+def mark_difference(hunk_length, offset, boxes, changes, both=False):
     # We're passed an offset and length into a document given to us
     # by the text comparison, and we'll mark the text boxes passed
     # in boxes as having changed content.
@@ -195,7 +205,10 @@ def mark_difference(hunk_length, offset, boxes, changes):
         # Mark this box as changed. Discard the box.
         # Now that we know it's changed, there's no reason to hold onto it.
         # It can't be marked as changed twice.
-        changes.append(boxes.pop(0))
+        box = boxes.pop(0)
+        if both:
+            box['*'] = '*'
+        changes.append(box)
 
 
 # Turns a JSON object of PDF changes into a PIL image object.
@@ -228,11 +241,11 @@ def render_changes(changes, styles):
     # break up pages into sub-page images and insert whitespace between
     # them.
 
-    page_groups = realign_pages(pages, changes)
+    pages, page_groups = realign_pages(pages, changes)
 
     # Draw red rectangles.
 
-    draw_red_boxes(changes, pages, styles)
+    pages = draw_red_boxes(changes, pages, styles)
 
     # Zealous crop to make output nicer. We do this after
     # drawing rectangles so that we don't mess up coordinates.
@@ -254,7 +267,7 @@ def make_pages_images(changes):
         pdf_index = change['pdf']['index']
         pdf_page = change['page']['number']
         if pdf_page not in pages[pdf_index]:
-            pages[pdf_index][pdf_page] = pdftopng(change['pdf']['file'],
+            pages[pdf_index][pdf_page] = pdftoimage(change['pdf']['file'],
                                                   pdf_page)
     return pages
 
@@ -346,14 +359,14 @@ def realign_pages(pages, changes):
                 # no page is on both sides of this asterisk,
                 # so start a new group
                 page_groups.append(({}, {}))
-    return page_groups
+    return pages, page_groups
 
 
 def draw_red_boxes(changes, pages, styles):
     # Draw red boxes around changes.
 
     for change in changes:
-        if change == '*':
+        if change.get('*'):
             continue  # not handled yet
 
         # 'box', 'strike', 'underline'
@@ -374,14 +387,20 @@ def draw_red_boxes(changes, pages, styles):
             draw.line((
                 change['x'], change['y'] + change['height'] / 2,
                 change['x'] + change['width'], change['y'] + change['height'] / 2
-                ), fill='red')
+                ), fill='red', width=2)
         elif style == 'underline':
             draw.line((
-                change['x'], change['y'] + change['height'],
-                change['x'] + change['width'], change['y'] + change['height']
-                ), fill='red')
+                # Pushing the line up by 3 pixels so it definitely shows in the
+                # image slice
+                change['x'], change['y'] + change['height'] - 3,
+                change['x'] + change['width'], change['y'] + change['height'] - 3
+                ), fill='red', width=2)
 
         del draw
+
+        pages[change['pdf']['index']][change['page']] = im
+
+    return pages
 
 
 def zealous_crop(page_groups):
@@ -423,6 +442,7 @@ def zealous_crop(page_groups):
                 if os.environ.get('HORZCROP', '1') != '0':
                     im = im.crop((minx, 0, maxx, im.size[1]))
                 grp[idx][pg] = im
+    return page_groups
 
 
 def stack_pages(page_groups):
@@ -487,11 +507,12 @@ def simplify_changes(boxes):
     # though they are probably the same semantic change.
     changes = []
     for b in boxes:
-        if len(changes) > 0 and changes[-1] != '*' and b != '*' \
+        if len(changes) > 0 \
             and changes[-1]['pdf'] == b['pdf'] \
             and changes[-1]['page'] == b['page'] \
             and changes[-1]['index'] + 1 == b['index'] \
             and changes[-1]['y'] == b['y'] \
+            and changes[-1].get('*') == b.get('*') \
                 and changes[-1]['height'] == b['height']:
             changes[-1]['width'] = b['x'] + b['width'] - changes[-1]['x']
             changes[-1]['text'] += b['text']
@@ -503,14 +524,13 @@ def simplify_changes(boxes):
 
 
 # Rasterizes a page of a PDF.
-def pdftopng(pdffile, pagenumber, width=900):
-    pngbytes = subprocess.check_output(
+def pdftoimage(pdffile, pagenumber):
+    imbytes = subprocess.check_output(
         ['pdftoppm',
             '-f', unicode(pagenumber),
             '-l', unicode(pagenumber),
-            '-scale-to', unicode(width),
-            '-png', pdffile])
-    im = Image.open(io.BytesIO(pngbytes))
+            pdffile])
+    im = Image.open(io.BytesIO(imbytes))
     return im.convert('RGBA')
 
 
@@ -576,8 +596,6 @@ def main():
                 and style[i] != 'underline':
             invalid_usage('--style values must be box, strike or underline, '
                           'not "%s".' % (style[i]))
-
-    # Ensure one of files or --changes are specified
     if len(args.files) == 0 and not args.changes:
         invalid_usage('Please specify files to compare, '
                       'or use --changes option.')
@@ -600,7 +618,3 @@ def main():
         bottom_margin=float(args.bottom_margin))
     img = render_changes(changes, style)
     img.save(sys.stdout, args.format.upper())
-
-
-if __name__ == "__main__":
-    main()
